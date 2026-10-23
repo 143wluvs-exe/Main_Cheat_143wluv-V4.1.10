@@ -1,0 +1,1119 @@
+
+--// MAIN NI YELIM | V4.2.10
+--// Roblox Studio - LocalScript
+--// Professional Black/White Animated RGB GUI
+
+--// MAIN NI YELIM | V4.1.10
+--// LocalScript - Roblox Studio
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+--------------------------------------------------
+-- SETTINGS
+--------------------------------------------------
+
+local AimEnabled = false
+local EspEnabled = false
+local BigheadEnabled = false
+
+local Smoothness = 1
+local FOV = 4
+
+local menuClosed = false
+local connections = {}
+local gui
+local aimConnection
+local disableESP
+local closeClickTeleportGui
+local stopFly
+local closeFlyGui
+
+--------------------------------------------------
+-- CONNECTION CLEANUP
+--------------------------------------------------
+
+local function trackConnection(connection)
+    table.insert(connections, connection)
+    return connection
+end
+
+--------------------------------------------------
+-- BIGHEAD (LOCAL VISUAL EFFECT FOR ALL PLAYERS)
+-- For a live game, changes to other players must be
+-- applied by a server Script to replicate to everyone.
+--------------------------------------------------
+
+local HEAD_SIZE = 4
+local HEAD_TRANSPARENCY = 0.7
+local HEAD_CAN_COLLIDE = false
+local originalHeadProperties = {}
+
+local function applyBigHead(character)
+    if not BigheadEnabled or not character then return end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local head = character:FindFirstChild("Head")
+    if not humanoid or not head or not head:IsA("BasePart") then return end
+
+    if not originalHeadProperties[head] then
+        originalHeadProperties[head] = {
+            Size = head.Size,
+            Transparency = head.Transparency,
+            CanCollide = head.CanCollide,
+        }
+    end
+
+    local original = originalHeadProperties[head]
+    if humanoid.RigType == Enum.HumanoidRigType.R6 then
+        head.Size = Vector3.new(HEAD_SIZE, HEAD_SIZE, HEAD_SIZE)
+    else
+        head.Size = original.Size * HEAD_SIZE
+    end
+    head.Transparency = HEAD_TRANSPARENCY
+    head.CanCollide = HEAD_CAN_COLLIDE
+end
+
+local function restoreBigHeads()
+    BigheadEnabled = false
+    for head, original in pairs(originalHeadProperties) do
+        if head and head.Parent then
+            head.Size = original.Size
+            head.Transparency = original.Transparency
+            head.CanCollide = original.CanCollide
+        end
+    end
+    table.clear(originalHeadProperties)
+end
+
+local function applyBigHeadToAllPlayers()
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player.Character then
+            applyBigHead(player.Character)
+        end
+    end
+end
+
+-- Keep newly joining players and respawns in sync with the toggle.
+for _, player in ipairs(Players:GetPlayers()) do
+    trackConnection(player.CharacterAdded:Connect(function(character)
+        task.wait(0.2)
+        if BigheadEnabled and not menuClosed then
+            applyBigHead(character)
+        end
+    end))
+end
+
+trackConnection(Players.PlayerAdded:Connect(function(player)
+    trackConnection(player.CharacterAdded:Connect(function(character)
+        task.wait(0.2)
+        if BigheadEnabled and not menuClosed then
+            applyBigHead(character)
+        end
+    end))
+    if player.Character and BigheadEnabled then
+        applyBigHead(player.Character)
+    end
+end))
+
+local function stopAll()
+    if menuClosed then
+        return
+    end
+
+    menuClosed = true
+
+    if closeClickTeleportGui then
+        closeClickTeleportGui()
+    end
+    if closeFlyGui then
+        closeFlyGui(true)
+    elseif stopFly then
+        stopFly()
+    end
+
+    AimEnabled = false
+    EspEnabled = false
+    restoreBigHeads()
+
+    for _, connection in ipairs(connections) do
+        if connection.Connected then
+            connection:Disconnect()
+        end
+    end
+
+    table.clear(connections)
+
+    if gui then
+        gui:Destroy()
+        gui = nil
+    end
+end
+
+--------------------------------------------------
+-- TARGET FUNCTIONS
+--------------------------------------------------
+
+local function getTargetPart(character)
+    local head = character:FindFirstChild("Head")
+    local root = character:FindFirstChild("HumanoidRootPart")
+
+    if head then
+        return head.Position
+    elseif root then
+        return root.Position
+    end
+
+    return nil
+end
+
+local function getClosestPlayer()
+    local camera = workspace.CurrentCamera
+    if not camera then
+        return nil
+    end
+
+    local myCharacter = LocalPlayer.Character
+    local myRoot = myCharacter
+        and myCharacter:FindFirstChild("HumanoidRootPart")
+
+    if not myRoot then
+        return nil
+    end
+
+    local closestTarget = nil
+    local shortestDistance = math.huge
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            local character = player.Character
+            local humanoid = character:FindFirstChildOfClass("Humanoid")
+            local root = character:FindFirstChild("HumanoidRootPart")
+            local targetPos = getTargetPart(character)
+
+            if humanoid and humanoid.Health > 0
+                and root and targetPos then
+
+                local _, onScreen =
+                    camera:WorldToScreenPoint(targetPos)
+
+                if onScreen then
+                    local offset = targetPos - camera.CFrame.Position
+
+                    if offset.Magnitude > 0 then
+                        local angle = math.deg(math.acos(math.clamp(
+                            camera.CFrame.LookVector:Dot(offset.Unit),
+                            -1,
+                            1
+                        )))
+
+                        local distance =
+                            (myRoot.Position - targetPos).Magnitude
+
+                        if angle <= FOV and distance < shortestDistance then
+                            shortestDistance = distance
+                            closestTarget = targetPos
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return closestTarget
+end
+
+local function aimAtTarget()
+    local camera = workspace.CurrentCamera
+    if not camera then
+        return
+    end
+
+    local target = getClosestPlayer()
+
+    if target then
+        local targetCFrame =
+            CFrame.new(camera.CFrame.Position, target)
+
+        camera.CFrame =
+            camera.CFrame:Lerp(targetCFrame, Smoothness)
+    end
+end
+
+--------------------------------------------------
+-- YELIM RAINBOW ESP
+--------------------------------------------------
+
+local ESP_ENABLED = false
+local RAINBOW_SPEED = 0.5
+local MAX_DISTANCE = 1000
+local HIGHLIGHT_NAME = "YelimRainbowESP"
+local BILLBOARD_NAME = "YelimUsernameESP"
+local espTracked = {}
+
+local function rainbowColor()
+    return Color3.fromHSV((os.clock() * RAINBOW_SPEED) % 1, 1, 1)
+end
+
+local function removeESP(character)
+    if not character then return end
+
+    local data = espTracked[character]
+    if data then
+        if data.highlight then data.highlight:Destroy() end
+        if data.billboard then data.billboard:Destroy() end
+        espTracked[character] = nil
+    end
+
+    -- Also remove leftovers if the character had a previous ESP instance.
+    local oldHighlight = character:FindFirstChild(HIGHLIGHT_NAME)
+    if oldHighlight then oldHighlight:Destroy() end
+
+    local head = character:FindFirstChild("Head")
+    if head then
+        local oldBillboard = head:FindFirstChild(BILLBOARD_NAME)
+        if oldBillboard then oldBillboard:Destroy() end
+    end
+end
+
+local function addESP(character, username)
+    if not ESP_ENABLED or not character or espTracked[character] then return end
+
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local head = character:FindFirstChild("Head")
+    if not humanoid or not head or humanoid.Health <= 0 then return end
+
+    local highlight = Instance.new("Highlight")
+    highlight.Name = HIGHLIGHT_NAME
+    highlight.Adornee = character
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.FillTransparency = 0.7
+    highlight.OutlineTransparency = 0
+    highlight.Parent = character
+
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = BILLBOARD_NAME
+    billboard.Adornee = head
+    billboard.Size = UDim2.fromOffset(50, 38)
+    billboard.StudsOffset = Vector3.new(0, -4, 0)
+    billboard.AlwaysOnTop = true
+    billboard.MaxDistance = MAX_DISTANCE
+    billboard.Parent = head
+
+    local label = Instance.new("TextLabel")
+    label.Name = "Username"
+    label.Size = UDim2.fromScale(1, 1)
+    label.BackgroundTransparency = 1
+    label.Text = username or character.Name
+    label.TextColor3 = Color3.new(1, 1, 1)
+    label.TextStrokeTransparency = 0
+    label.TextScaled = true
+    label.Font = Enum.Font.GothamBold
+    label.Parent = billboard
+
+    espTracked[character] = {
+        highlight = highlight,
+        billboard = billboard,
+        label = label
+    }
+end
+
+local function addPlayerCharacterESP(player, character)
+    if not ESP_ENABLED or not player or not character then return end
+
+    task.spawn(function()
+        local head = character:WaitForChild("Head", 10)
+        local humanoid = character:WaitForChild("Humanoid", 10)
+        if ESP_ENABLED and head and humanoid and player.Parent == Players then
+            addESP(character, player.Name)
+        end
+    end)
+end
+
+local function clearAllESP()
+    local characters = {}
+    for character in pairs(espTracked) do
+        table.insert(characters, character)
+    end
+    for _, character in ipairs(characters) do
+        removeESP(character)
+    end
+end
+
+local function enableESP()
+    ESP_ENABLED = true
+
+    -- Player characters only; NPC scanning has been removed.
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player.Character then
+            addPlayerCharacterESP(player, player.Character)
+        end
+    end
+end
+
+disableESP = function()
+    ESP_ENABLED = false
+    clearAllESP()
+end
+
+-- Track player joins and respawns only.
+trackConnection(Players.PlayerAdded:Connect(function(player)
+    trackConnection(player.CharacterAdded:Connect(function(character)
+        addPlayerCharacterESP(player, character)
+    end))
+    if player.Character then
+        addPlayerCharacterESP(player, player.Character)
+    end
+end))
+
+for _, player in ipairs(Players:GetPlayers()) do
+    trackConnection(player.CharacterAdded:Connect(function(character)
+        addPlayerCharacterESP(player, character)
+    end))
+end
+
+trackConnection(Players.PlayerRemoving:Connect(function(player)
+    if player.Character then
+        removeESP(player.Character)
+    end
+end))
+
+-- Update rainbow colors while ESP is enabled.
+trackConnection(RunService.RenderStepped:Connect(function()
+    if not ESP_ENABLED then return end
+
+    local color = rainbowColor()
+    for character, data in pairs(espTracked) do
+        if not character.Parent or not data.highlight.Parent or not data.billboard.Parent then
+            removeESP(character)
+        else
+            data.highlight.FillColor = color
+            data.highlight.OutlineColor = color
+            data.label.TextColor3 = color
+        end
+    end
+end))
+
+--------------------------------------------------
+-- CREATE GUI
+--------------------------------------------------
+
+gui = Instance.new("ScreenGui")
+gui.Name = "AimbotGUI"
+gui.ResetOnSpawn = false
+gui.Parent = PlayerGui
+
+local box = Instance.new("Frame")
+box.Name = "MainBox"
+box.Size = UDim2.new(0, 430, 0, 340)
+box.Position = UDim2.new(0.5, -215, 0.5, -165)
+box.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+box.BackgroundTransparency = 0.15
+box.BorderSizePixel = 0
+box.Active = true
+box.Draggable = true
+box.Parent = gui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 12)
+corner.Parent = box
+
+--------------------------------------------------
+-- TITLE
+--------------------------------------------------
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -115, 0, 40)
+title.Position = UDim2.new(0, 10, 0, 0)
+title.BackgroundTransparency = 1
+title.Text = "MAIN CHEAT - OWNER YELIM"
+title.TextColor3 = Color3.new(1, 1, 1)
+title.TextSize = 20
+title.Font = Enum.Font.GothamBold
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = box
+
+--------------------------------------------------
+-- CLOSE BUTTON (X)
+--------------------------------------------------
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Name = "CloseButton"
+closeBtn.Size = UDim2.new(0, 32, 0, 30)
+closeBtn.Position = UDim2.new(1, -38, 0, 5)
+closeBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+closeBtn.Transparency = 0.5
+closeBtn.Text = "X"
+closeBtn.TextColor3 = Color3.new(1, 1, 1)
+closeBtn.TextSize = 18
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.BorderSizePixel = 0
+closeBtn.ZIndex = 5
+closeBtn.Parent = box
+
+--------------------------------------------------
+-- MINIMIZE BUTTON (-)
+--------------------------------------------------
+
+local minimizeBtn = Instance.new("TextButton")
+minimizeBtn.Name = "MinimizeButton"
+minimizeBtn.Size = UDim2.new(0, 32, 0, 30)
+minimizeBtn.Position = UDim2.new(1, -74, 0, 5)
+minimizeBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+minimizeBtn.Transparency = 0.5
+minimizeBtn.Text = "-"
+minimizeBtn.TextColor3 = Color3.new(1, 1, 1)
+minimizeBtn.TextSize = 22
+minimizeBtn.Font = Enum.Font.GothamBold
+minimizeBtn.BorderSizePixel = 0
+minimizeBtn.ZIndex = 5
+minimizeBtn.Parent = box
+
+--------------------------------------------------
+-- STATUS
+--------------------------------------------------
+
+local status = Instance.new("TextLabel")
+status.Name = "Status"
+status.Position = UDim2.new(0, 0, 0, 40)
+status.Size = UDim2.new(1, 0, 0, 25)
+status.BackgroundTransparency = 1
+status.Text = "Status: OFF"
+status.TextColor3 = Color3.fromRGB(255, 80, 80)
+status.TextSize = 16
+status.Font = Enum.Font.Gotham
+status.Parent = box
+
+--------------------------------------------------
+-- BUTTON CREATOR
+--------------------------------------------------
+
+local function createToggleButton(name, text, yPosition)
+    local btn = Instance.new("TextButton")
+    btn.Name = name
+    btn.Position = UDim2.new(0, 20, 0, yPosition)
+    btn.Size = UDim2.new(1, -40, 0, 40)
+    btn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    btn.Text = text
+    btn.TextColor3 = Color3.new(1, 1, 1)
+    btn.TextSize = 17
+    btn.Font = Enum.Font.GothamBold
+    btn.BorderSizePixel = 0
+    btn.Parent = box
+
+    local btnCorner = Instance.new("UICorner")
+    btnCorner.CornerRadius = UDim.new(0, 8)
+    btnCorner.Parent = btn
+
+    return btn
+end
+
+--------------------------------------------------
+-- AIMBOT BUTTON
+--------------------------------------------------
+
+local aimButton = createToggleButton(
+    "AimbotButton",
+    "AIMBOT (143wluv$)",
+    76
+)
+
+trackConnection(aimButton.MouseButton1Click:Connect(function()
+    if menuClosed then return end
+
+    AimEnabled = not AimEnabled
+
+    if AimEnabled then
+        aimButton.BackgroundColor3 = Color3.fromRGB(25, 120, 60)
+        status.Text = "Status: AIMBOT ON"
+        status.TextColor3 = Color3.fromRGB(80, 255, 120)
+    else
+        aimButton.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+        status.Text = "Status: OFF"
+        status.TextColor3 = Color3.fromRGB(255, 80, 80)
+    end
+end))
+
+--------------------------------------------------
+-- ESP BUTTON
+-- UI STATE ONLY
+--------------------------------------------------
+
+local espButton = createToggleButton(
+    "EspButton",
+    "ESP (143wluv$)",
+    120
+)
+
+trackConnection(espButton.MouseButton1Click:Connect(function()
+    if menuClosed then return end
+
+    EspEnabled = not EspEnabled
+
+    if EspEnabled then
+        enableESP()
+        espButton.BackgroundColor3 = Color3.fromRGB(25, 120, 60)
+        status.Text = "Status: ESP ON"
+        status.TextColor3 = Color3.fromRGB(80, 255, 120)
+    else
+        disableESP()
+        espButton.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+        status.Text = "Status: OFF"
+        status.TextColor3 = Color3.fromRGB(255, 80, 80)
+    end
+end))
+
+--------------------------------------------------
+-- AIMBOT BUTTON
+--------------------------------------------------
+
+local bigheadButton = createToggleButton(
+    "BigheadButton",
+    "BIGHEAD (143wluv$)",
+    165
+)
+
+trackConnection(bigheadButton.MouseButton1Click:Connect(function()
+    if menuClosed then return end
+
+    BigheadEnabled = not BigheadEnabled
+
+    if BigheadEnabled then
+        applyBigHeadToAllPlayers()
+        bigheadButton.BackgroundColor3 = Color3.fromRGB(25, 120, 60)
+        status.Text = "Status: BIGHEAD ON"
+        status.TextColor3 = Color3.fromRGB(80, 255, 120)
+    else
+        restoreBigHeads()
+        bigheadButton.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+        status.Text = "Status: OFF"
+        status.TextColor3 = Color3.fromRGB(255, 80, 80)
+    end
+end))
+
+--------------------------------------------------
+-- CLICK TELEPORT V2 BUTTON + GUI
+--------------------------------------------------
+
+local clickTeleportButton = createToggleButton(
+    "ClickTeleportButton",
+    "CLICK TELEPORT",
+    210
+)
+
+local clickTeleportGui = nil
+local clickTeleportConnections = {}
+
+local function trackClickTeleportConnection(connection)
+    table.insert(clickTeleportConnections, connection)
+    return connection
+end
+
+closeClickTeleportGui = function()
+    for _, connection in ipairs(clickTeleportConnections) do
+        if connection.Connected then
+            connection:Disconnect()
+        end
+    end
+    table.clear(clickTeleportConnections)
+
+    if clickTeleportGui then
+        clickTeleportGui:Destroy()
+        clickTeleportGui = nil
+    end
+end
+
+local function openClickTeleportGui()
+    if menuClosed then return end
+
+    -- Avoid opening duplicate Click Teleport windows.
+    if clickTeleportGui and clickTeleportGui.Parent then
+        clickTeleportGui.Enabled = true
+        return
+    end
+
+    local Mouse = LocalPlayer:GetMouse()
+    local Enabled = true
+    local Minimized = false
+    local HeightOffset = 4
+    local Cooldown = 0.5
+    local LastTeleport = 0
+
+    local Gui = Instance.new("ScreenGui")
+    Gui.Name = "YelimClickTeleport"
+    Gui.ResetOnSpawn = false
+    Gui.Parent = PlayerGui
+    clickTeleportGui = Gui
+
+    local Main = Instance.new("Frame")
+    Main.Name = "Main"
+    Main.Size = UDim2.fromOffset(280, 205)
+    Main.Position = UDim2.new(0.5, -140, 0.5, -102)
+    Main.BackgroundColor3 = Color3.fromRGB(22, 22, 27)
+    Main.BorderSizePixel = 0
+    Main.Active = true
+    Main.Draggable = true
+    Main.Parent = Gui
+
+    local Corner = Instance.new("UICorner")
+    Corner.CornerRadius = UDim.new(0, 10)
+    Corner.Parent = Main
+
+    local Stroke = Instance.new("UIStroke")
+    Stroke.Thickness = 2
+    Stroke.Color = Color3.fromRGB(255, 255, 255)
+    Stroke.Parent = Main
+
+    local function MakeButton(name, text, size, pos, parent)
+        local button = Instance.new("TextButton")
+        button.Name = name
+        button.Text = text
+        button.Size = size
+        button.Position = pos
+        button.BackgroundColor3 = Color3.fromRGB(43, 43, 52)
+        button.TextColor3 = Color3.new(1, 1, 1)
+        button.TextSize = 14
+        button.Font = Enum.Font.GothamBold
+        button.BorderSizePixel = 0
+        button.Parent = parent
+
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 6)
+        corner.Parent = button
+        return button
+    end
+
+    local Title = Instance.new("TextLabel")
+    Title.Size = UDim2.new(1, -85, 0, 38)
+    Title.Position = UDim2.fromOffset(12, 0)
+    Title.BackgroundTransparency = 1
+    Title.Text = "YELIM | CLICK TELEPORT"
+    Title.TextColor3 = Color3.new(1, 1, 1)
+    Title.TextSize = 14
+    Title.Font = Enum.Font.GothamBold
+    Title.TextXAlignment = Enum.TextXAlignment.Left
+    Title.Parent = Main
+
+    local MinButton = MakeButton("Minimize", "−", UDim2.fromOffset(30, 28), UDim2.new(1, -68, 0, 5), Main)
+    local CloseButton = MakeButton("Close", "X", UDim2.fromOffset(30, 28), UDim2.new(1, -34, 0, 5), Main)
+
+    local Status = Instance.new("TextLabel")
+    Status.Size = UDim2.new(1, -24, 0, 25)
+    Status.Position = UDim2.fromOffset(12, 48)
+    Status.BackgroundTransparency = 1
+    Status.TextColor3 = Color3.fromRGB(120, 255, 150)
+    Status.Text = "STATUS: ON"
+    Status.TextSize = 14
+    Status.Font = Enum.Font.Gotham
+    Status.Parent = Main
+
+    local ToggleButton = MakeButton("Toggle", "TELEPORT: ON", UDim2.new(1, -24, 0, 36), UDim2.fromOffset(12, 80), Main)
+
+    local HeightLabel = Instance.new("TextLabel")
+    HeightLabel.Size = UDim2.new(1, -24, 0, 24)
+    HeightLabel.Position = UDim2.fromOffset(12, 124)
+    HeightLabel.BackgroundTransparency = 1
+    HeightLabel.TextColor3 = Color3.new(1, 1, 1)
+    HeightLabel.Text = "Teleport height: 4"
+    HeightLabel.TextSize = 13
+    HeightLabel.Font = Enum.Font.Gotham
+    HeightLabel.Parent = Main
+
+    local LowerButton = MakeButton("LowerHeight", "-", UDim2.fromOffset(55, 30), UDim2.fromOffset(55, 158), Main)
+    local RaiseButton = MakeButton("RaiseHeight", "+", UDim2.fromOffset(55, 30), UDim2.fromOffset(170, 158), Main)
+
+    local function Refresh()
+        Status.Text = Enabled and "STATUS: ON" or "STATUS: OFF"
+        Status.TextColor3 = Enabled and Color3.fromRGB(120, 255, 150) or Color3.fromRGB(255, 120, 120)
+        ToggleButton.Text = Enabled and "TELEPORT: ON" or "TELEPORT: OFF"
+        ToggleButton.BackgroundColor3 = Enabled and Color3.fromRGB(25, 100, 55) or Color3.fromRGB(43, 43, 52)
+    end
+
+    trackClickTeleportConnection(ToggleButton.Activated:Connect(function()
+        Enabled = not Enabled
+        Refresh()
+    end))
+
+    trackClickTeleportConnection(RaiseButton.Activated:Connect(function()
+        HeightOffset = math.min(HeightOffset + 2, 50)
+        HeightLabel.Text = "Teleport height: " .. HeightOffset
+    end))
+
+    trackClickTeleportConnection(LowerButton.Activated:Connect(function()
+        HeightOffset = math.max(HeightOffset - 2, 0)
+        HeightLabel.Text = "Teleport height: " .. HeightOffset
+    end))
+
+    trackClickTeleportConnection(MinButton.Activated:Connect(function()
+        Minimized = not Minimized
+        for _, child in ipairs(Main:GetChildren()) do
+            if child ~= Title and child ~= MinButton and child ~= CloseButton
+                and child ~= Corner and child ~= Stroke then
+                child.Visible = not Minimized
+            end
+        end
+        Main.Size = Minimized and UDim2.fromOffset(280, 38) or UDim2.fromOffset(280, 205)
+    end))
+
+    trackClickTeleportConnection(CloseButton.Activated:Connect(closeClickTeleportGui))
+
+    trackClickTeleportConnection(UserInputService.InputBegan:Connect(function(input, processed)
+        if menuClosed or not clickTeleportGui or not clickTeleportGui.Parent or processed then return end
+        if input.KeyCode == Enum.KeyCode.T then
+            Enabled = not Enabled
+            Refresh()
+        end
+    end))
+
+    trackClickTeleportConnection(UserInputService.InputBegan:Connect(function(input, processed)
+        if processed or input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+        if menuClosed or not clickTeleportGui or not clickTeleportGui.Parent or not Enabled then return end
+        if os.clock() - LastTeleport < Cooldown then return end
+
+        local Character = LocalPlayer.Character
+        local Root = Character and Character:FindFirstChild("HumanoidRootPart")
+        local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
+        if not Root or not Humanoid or Humanoid.Health <= 0 then return end
+
+        local Target = Mouse.Hit
+        if not Target then return end
+
+        LastTeleport = os.clock()
+        local Position = Target.Position + Vector3.new(0, HeightOffset, 0)
+        Root.CFrame = CFrame.new(Position) * Root.CFrame.Rotation
+    end))
+
+    Refresh()
+end
+
+trackConnection(clickTeleportButton.Activated:Connect(openClickTeleportGui))
+
+--------------------------------------------------
+-- YELIM FLY BUTTON + SEPARATE FLY GUI
+--------------------------------------------------
+
+local flyEnabled = false
+local flySpeed = 60
+local flyVelocity = nil
+local flyGyro = nil
+local flyConnection = nil
+local flyGui = nil
+local flyGuiConnections = {}
+local flyToggleButton = nil
+
+local function trackFlyGuiConnection(connection)
+    table.insert(flyGuiConnections, connection)
+    return connection
+end
+
+stopFly = function()
+    flyEnabled = false
+    if flyConnection then
+        flyConnection:Disconnect()
+        flyConnection = nil
+    end
+    if flyVelocity then
+        flyVelocity:Destroy()
+        flyVelocity = nil
+    end
+    if flyGyro then
+        flyGyro:Destroy()
+        flyGyro = nil
+    end
+end
+
+local function startFly()
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    if not humanoid or not root or humanoid.Health <= 0 then
+        return false
+    end
+
+    stopFly()
+    flyEnabled = true
+
+    flyVelocity = Instance.new("BodyVelocity")
+    flyVelocity.Name = "YelimFlyVelocity"
+    flyVelocity.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+    flyVelocity.Velocity = Vector3.zero
+    flyVelocity.Parent = root
+
+    flyGyro = Instance.new("BodyGyro")
+    flyGyro.Name = "YelimFlyGyro"
+    flyGyro.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+    flyGyro.P = 9000
+    flyGyro.D = 500
+    flyGyro.CFrame = workspace.CurrentCamera and workspace.CurrentCamera.CFrame or root.CFrame
+    flyGyro.Parent = root
+
+    flyConnection = RunService.RenderStepped:Connect(function()
+        if not flyEnabled or not root.Parent or not humanoid.Parent or humanoid.Health <= 0 then
+            stopFly()
+            if flyToggleButton and flyToggleButton.Parent then
+                flyToggleButton.Text = "FLY: OFF"
+                flyToggleButton.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+            end
+            return
+        end
+
+        local camera = workspace.CurrentCamera
+        if not camera or not flyVelocity or not flyGyro then return end
+
+        local vertical = 0
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+            vertical = 1
+        elseif UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
+            vertical = -1
+        end
+        flyVelocity.Velocity = humanoid.MoveDirection * flySpeed + Vector3.new(0, vertical * flySpeed, 0)
+        flyGyro.CFrame = camera.CFrame
+    end)
+    return true
+end
+
+closeFlyGui = function(stopFlight)
+    if stopFlight then stopFly() end
+    for _, connection in ipairs(flyGuiConnections) do
+        if connection.Connected then connection:Disconnect() end
+    end
+    table.clear(flyGuiConnections)
+    if flyGui then
+        flyGui:Destroy()
+        flyGui = nil
+    end
+    flyToggleButton = nil
+end
+
+local function openFlyGui()
+    if menuClosed then return end
+    if flyGui and flyGui.Parent then
+        flyGui.Enabled = true
+        return
+    end
+
+    flyGui = Instance.new("ScreenGui")
+    flyGui.Name = "YelimFlyGUI"
+    flyGui.ResetOnSpawn = false
+    flyGui.Parent = PlayerGui
+
+    local panel = Instance.new("Frame")
+    panel.Name = "FlyPanel"
+    panel.Size = UDim2.fromOffset(280, 210)
+    panel.Position = UDim2.new(0.5, -140, 0.5, -105)
+    panel.BackgroundColor3 = Color3.fromRGB(22, 22, 27)
+    panel.BorderSizePixel = 0
+    panel.Active = true
+    panel.Draggable = true
+    panel.Parent = flyGui
+    Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 10)
+    local stroke = Instance.new("UIStroke")
+    stroke.Thickness = 2
+    stroke.Color = Color3.fromRGB(255, 255, 255)
+    stroke.Parent = panel
+
+    local function makeFlyButton(name, text, size, pos)
+        local b = Instance.new("TextButton")
+        b.Name = name
+        b.Text = text
+        b.Size = size
+        b.Position = pos
+        b.BackgroundColor3 = Color3.fromRGB(43, 43, 52)
+        b.TextColor3 = Color3.new(1, 1, 1)
+        b.TextSize = 14
+        b.Font = Enum.Font.GothamBold
+        b.BorderSizePixel = 0
+        b.Parent = panel
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+        return b
+    end
+
+    local titleLabel = Instance.new("TextLabel")
+    titleLabel.Size = UDim2.new(1, -85, 0, 38)
+    titleLabel.Position = UDim2.fromOffset(12, 0)
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.Text = "YELIM | FLY V1.0"
+    titleLabel.TextColor3 = Color3.new(1, 1, 1)
+    titleLabel.TextSize = 14
+    titleLabel.Font = Enum.Font.GothamBold
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    titleLabel.Parent = panel
+
+    local minimize = makeFlyButton("Minimize", "−", UDim2.fromOffset(30, 28), UDim2.new(1, -68, 0, 5))
+    local close = makeFlyButton("Close", "X", UDim2.fromOffset(30, 28), UDim2.new(1, -34, 0, 5))
+    local statusLabel = Instance.new("TextLabel")
+    statusLabel.Size = UDim2.new(1, -24, 0, 25)
+    statusLabel.Position = UDim2.fromOffset(12, 42)
+    statusLabel.BackgroundTransparency = 1
+    statusLabel.TextColor3 = Color3.fromRGB(255, 120, 120)
+    statusLabel.Text = "STATUS: OFF"
+    statusLabel.TextSize = 13
+    statusLabel.Font = Enum.Font.Gotham
+    statusLabel.Parent = panel
+
+    flyToggleButton = makeFlyButton("ToggleFly", "FLY: OFF", UDim2.new(1, -24, 0, 36), UDim2.fromOffset(12, 72))
+    local speedLabel = Instance.new("TextLabel")
+    speedLabel.Size = UDim2.new(1, -24, 0, 25)
+    speedLabel.Position = UDim2.fromOffset(12, 114)
+    speedLabel.BackgroundTransparency = 1
+    speedLabel.TextColor3 = Color3.new(1, 1, 1)
+    speedLabel.Text = "FLY SPEED: " .. flySpeed
+    speedLabel.TextSize = 13
+    speedLabel.Font = Enum.Font.Gotham
+    speedLabel.Parent = panel
+    local slower = makeFlyButton("Slower", "− SPEED", UDim2.fromOffset(110, 32), UDim2.fromOffset(18, 154))
+    local faster = makeFlyButton("Faster", "+ SPEED", UDim2.fromOffset(110, 32), UDim2.fromOffset(152, 154))
+
+    local minimized = false
+    trackFlyGuiConnection(flyToggleButton.Activated:Connect(function()
+        if flyEnabled then
+            stopFly()
+        else
+            startFly()
+        end
+        local isOn = flyEnabled
+        flyToggleButton.Text = isOn and "FLY: ON" or "FLY: OFF"
+        flyToggleButton.BackgroundColor3 = isOn and Color3.fromRGB(25, 120, 60) or Color3.fromRGB(60, 60, 60)
+        statusLabel.Text = isOn and "STATUS: ON | WASD MOVE, SPACE UP, CTRL DOWN" or "STATUS: OFF"
+        statusLabel.TextColor3 = isOn and Color3.fromRGB(120, 255, 150) or Color3.fromRGB(255, 120, 120)
+    end))
+    trackFlyGuiConnection(slower.Activated:Connect(function()
+        flySpeed = math.max(10, flySpeed - 10)
+        speedLabel.Text = "FLY SPEED: " .. flySpeed
+    end))
+    trackFlyGuiConnection(faster.Activated:Connect(function()
+        flySpeed = math.min(200, flySpeed + 10)
+        speedLabel.Text = "FLY SPEED: " .. flySpeed
+    end))
+    trackFlyGuiConnection(minimize.Activated:Connect(function()
+        minimized = not minimized
+        statusLabel.Visible = not minimized
+        flyToggleButton.Visible = not minimized
+        speedLabel.Visible = not minimized
+        slower.Visible = not minimized
+        faster.Visible = not minimized
+        panel.Size = minimized and UDim2.fromOffset(280, 38) or UDim2.fromOffset(280, 210)
+        minimize.Text = minimized and "+" or "−"
+    end))
+    trackFlyGuiConnection(close.Activated:Connect(function()
+        closeFlyGui(true)
+    end))
+end
+
+local flyMainButton = createToggleButton("FlyButton", "FLY", 255)
+trackConnection(flyMainButton.Activated:Connect(openFlyGui))
+
+trackConnection(UserInputService.InputBegan:Connect(function(input, processed)
+    if menuClosed or processed or UserInputService:GetFocusedTextBox() then return end
+    if input.KeyCode == Enum.KeyCode.F then
+        if flyEnabled then
+            stopFly()
+        else
+            startFly()
+        end
+        if flyToggleButton and flyToggleButton.Parent then
+            flyToggleButton.Text = flyEnabled and "FLY: ON" or "FLY: OFF"
+            flyToggleButton.BackgroundColor3 = flyEnabled and Color3.fromRGB(25, 120, 60) or Color3.fromRGB(60, 60, 60)
+        end
+    end
+end))
+
+trackConnection(LocalPlayer.CharacterAdded:Connect(function()
+    stopFly()
+    if flyToggleButton and flyToggleButton.Parent then
+        flyToggleButton.Text = "FLY: OFF"
+        flyToggleButton.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    end
+end))
+
+--------------------------------------------------
+-- VERSION
+--------------------------------------------------
+
+local version = Instance.new("TextLabel")
+version.Name = "Version"
+version.Size = UDim2.new(1, 0, 0, 25)
+version.Position = UDim2.new(0, 0, 1, -28)
+version.BackgroundTransparency = 1
+version.Text = "V4.2.10"
+version.TextColor3 = Color3.fromRGB(180, 180, 180)
+version.TextSize = 14
+version.Font = Enum.Font.Gotham
+version.Parent = box
+
+--------------------------------------------------
+-- RESTORE BUTTON
+--------------------------------------------------
+
+local restoreBtn = Instance.new("TextButton")
+restoreBtn.Name = "RestoreButton"
+restoreBtn.Size = UDim2.new(0, 100, 0, 35)
+restoreBtn.Position = UDim2.new(0, 15, 0.5, -300)
+restoreBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+restoreBtn.Text = "143WLUV$"
+restoreBtn.TextColor3 = Color3.new(1, 1, 1)
+restoreBtn.TextSize = 14
+restoreBtn.Font = Enum.Font.GothamBold
+restoreBtn.Visible = false
+restoreBtn.Parent = gui
+
+--------------------------------------------------
+-- MINIMIZE / RESTORE FUNCTIONS
+--------------------------------------------------
+
+trackConnection(minimizeBtn.MouseButton1Click:Connect(function()
+    if menuClosed then return end
+
+    box.Visible = false
+    restoreBtn.Visible = true
+end))
+
+trackConnection(restoreBtn.MouseButton1Click:Connect(function()
+    if menuClosed then return end
+
+    box.Visible = true
+    restoreBtn.Visible = false
+end))
+
+--------------------------------------------------
+-- CLOSE EVERYTHING
+--------------------------------------------------
+
+trackConnection(closeBtn.MouseButton1Click:Connect(function()
+    stopAll()
+end))
+
+--------------------------------------------------
+-- RENDER LOOP
+--------------------------------------------------
+
+aimConnection = RunService.RenderStepped:Connect(function()
+    if menuClosed or not gui or not gui.Parent then
+        return
+    end
+
+    if AimEnabled then
+        aimAtTarget()
+    end
+
+    if ESP_ENABLED then
+        local color = rainbowColor()
+        for character, data in pairs(espTracked) do
+            if not character.Parent
+                or not data.highlight or not data.highlight.Parent
+                or not data.billboard or not data.billboard.Parent then
+                removeESP(character)
+            else
+                data.highlight.FillColor = color
+                data.highlight.OutlineColor = color
+                data.label.TextColor3 = color
+            end
+        end
+    end
+end)
+
+trackConnection(aimConnection)
